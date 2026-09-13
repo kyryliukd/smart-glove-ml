@@ -1,10 +1,10 @@
 import asyncio
-import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, WebSocket, status
 
 from . import models
+from .config import settings
 from .division_service import DivisionService
 from .gesture_detection_service import GestureDetectionService
 from .gesture_service import GestureService
@@ -12,47 +12,37 @@ from .rabbitmq_service import RabbitMQService
 from .storage_service import MinioStorage
 from .training_service import TrainingService
 
-RABBIT_URL = os.getenv("RABBITMQ_URL")
-MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT")
-MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY")
-MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY")
-SERVER_ENDPOINT = os.getenv("SERVER_ENDPOINT")
-
-MINIO_BUCKET_NAME = "models"
-
-SEQUENCE_LENGTH = 50
-NUM_FEATURES = 18
-
-CLOSE_POINTS_THRESHOLD = 30
-MIN_GESTURE_LENGTH = 100
-
-WINDOW_SIZE = 223
-
 gesture_service = GestureService(
-    sequence_length=SEQUENCE_LENGTH, num_features=NUM_FEATURES
+    sequence_length=settings.sequence_length,
+    num_features=settings.num_features,
 )
+
 division_service = DivisionService(
-    window_size=WINDOW_SIZE,
-    num_features=NUM_FEATURES,
+    window_size=settings.window_size,
+    num_features=settings.num_features,
 )
+
 gesture_detection_service = GestureDetectionService(
     gesture_service=gesture_service,
     division_service=division_service,
-    close_points_threshold=CLOSE_POINTS_THRESHOLD,
-    min_gesture_length=MIN_GESTURE_LENGTH,
+    close_points_threshold=settings.close_points_threshold,
+    min_gesture_length=settings.min_gesture_length,
 )
-rabbitmq = RabbitMQService(RABBIT_URL)
+
+rabbitmq = RabbitMQService(settings.rabbitmq_url)
+
 storage_service = MinioStorage(
-    minio_endpoint=MINIO_ENDPOINT,
-    minio_access_key=MINIO_ACCESS_KEY,
-    minio_secret_key=MINIO_SECRET_KEY,
-    bucket_name=MINIO_BUCKET_NAME,
+    minio_endpoint=settings.minio_endpoint,
+    minio_access_key=settings.minio_access_key,
+    minio_secret_key=settings.minio_secret_key,
+    bucket_name=settings.minio_bucket_name,
 )
+
 training_service = TrainingService(
     rabbitmq=rabbitmq,
     gesture_service=gesture_service,
     storage_service=storage_service,
-    server_endpoint=SERVER_ENDPOINT,
+    server_endpoint=settings.server_endpoint,
 )
 
 

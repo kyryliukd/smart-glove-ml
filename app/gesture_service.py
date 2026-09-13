@@ -185,7 +185,7 @@ class GestureService:
         )
 
         print(
-            "Custom model evaluation:"
+            "Custom gesture model evaluation:"
             f"  Train Accuracy: {train_accuracy * 100:.2f}%\n"
             f"  Test Accuracy: {test_accuracy * 100:.2f}%"
         )
