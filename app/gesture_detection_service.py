@@ -1,8 +1,7 @@
 """
-Service для обробки та розпізнавання жестів з потоку даних.
-Займається групуванням точок, детектуванням меж жестів та координацією з моделями.
+Service for processing and recognizing gestures from a data stream.
+Handles grouping of points, detecting gesture boundaries, and coordinating with models.
 """
-
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -12,7 +11,7 @@ from .gesture_service import GestureService
 
 
 class GestureDetectionService:
-    """Сервіс для детектування та розпізнавання жестів"""
+    """Gesture detection and recognition service"""
 
     def __init__(
         self,
@@ -26,16 +25,16 @@ class GestureDetectionService:
         self.close_points_threshold = close_points_threshold
         self.min_gesture_length = min_gesture_length
 
-    def group_points(self, points: List[int], threshold: int) -> List[List[int]]:
+    def _group_points(self, points: List[int], threshold: int) -> List[List[int]]:
         """
-        Групує сусідні точки з різних вікон, що вказують на одну подію.
+        Groups neighboring points from different windows that point to the same event.
 
         Args:
-            points: Список індексів точок
-            threshold: Максимальна відстань між точками в одній групі
+            points: List of point indices
+            threshold: Maximum distance between points in one group
 
         Returns:
-            Список груп точок
+            List of point groups
         """
         if not points:
             return []
@@ -53,7 +52,7 @@ class GestureDetectionService:
     def _get_error_response(
         self, message: str, status: str = "error"
     ) -> Dict[str, Any]:
-        """Створює стандартизовану відповідь з помилкою"""
+        """Creates a standardized error response"""
         return {"status": status, "message": message}
 
     async def process_window(
@@ -72,7 +71,7 @@ class GestureDetectionService:
         bool,
     ]:
         """
-        Обробляє одне вікно даних та намагається розпізнати жест.
+        Processes a single data window and attempts to recognize a gesture.
 
         Returns:
             (response, updated_stream, updated_starts, updated_ends, should_break)
@@ -93,8 +92,8 @@ class GestureDetectionService:
         detected_starts = sorted(detected_starts)
         detected_ends = sorted(detected_ends)
 
-        start_groups = self.group_points(detected_starts, self.close_points_threshold)
-        end_groups = self.group_points(detected_ends, self.close_points_threshold)
+        start_groups = self._group_points(detected_starts, self.close_points_threshold)
+        end_groups = self._group_points(detected_ends, self.close_points_threshold)
 
         print(
             {
@@ -105,11 +104,11 @@ class GestureDetectionService:
 
         is_two_groups_detected = len(start_groups) >= 2 and len(end_groups) >= 2
 
-        # Якщо не виявлено достатньо груп
+        # If not enough groups are detected
         if not is_two_groups_detected and not is_end_request:
             return None, stream, detected_starts, detected_ends, False
 
-        # Якщо это конець потоку та немає достатньо груп
+        # If this is the end of the stream and there are not enough groups
         if not is_two_groups_detected and is_end_request:
             return await self._handle_end_request_single_gesture(
                 start_groups,
@@ -120,7 +119,7 @@ class GestureDetectionService:
                 gesture_model,
             )
 
-        # Якщо виявлено 2+ групи та це конець потоку
+        # If 2+ groups are detected and this is the end of the stream
         if is_two_groups_detected and is_end_request:
             return await self._handle_end_request_multiple_gestures(
                 start_groups,
@@ -131,7 +130,7 @@ class GestureDetectionService:
                 gesture_model,
             )
 
-        # Якщо виявлено 2+ групи, але потік продовжується
+        # If 2+ groups are detected, but the stream continues
         return await self._handle_streaming_detection(
             start_groups,
             end_groups,
@@ -150,7 +149,7 @@ class GestureDetectionService:
         detected_ends: List[int],
         gesture_model: GestureService.Model,
     ) -> Tuple[Optional[Dict[str, Any]], List[List[float]], List[int], List[int], bool]:
-        """Обробляє конець потоку з однією можливою групою жеста"""
+        """Handles the end of the stream with one possible gesture group"""
         if len(start_groups) == 0 or len(end_groups) == 0:
             return (
                 self._get_error_response("Not enough data to detect a gesture"),
@@ -184,7 +183,7 @@ class GestureDetectionService:
             response["status"] = "recognized"
             return response, stream, detected_starts, detected_ends, True
 
-        # Спробувати наступні точки
+        # Try the next points
         for end_pt in potential_end_pts[1:]:
             if end_pt - start_pt >= self.min_gesture_length:
                 response = await self._recognize_gesture(
@@ -211,11 +210,11 @@ class GestureDetectionService:
         detected_ends: List[int],
         gesture_model: GestureService.Model,
     ) -> Tuple[Optional[Dict[str, Any]], List[List[float]], List[int], List[int], bool]:
-        """Обробляє конець потоку з декількома групами жестів"""
+        """Handles the end of the stream with multiple gesture groups"""
         start_pts = [int(np.mean(g)) for g in start_groups]
         end_pts = [int(np.mean(g)) for g in end_groups]
 
-        # Обробляємо перший жест
+        # Process the first gesture
         i = 0
         while i < len(start_pts):
             start_pt = start_pts[i]
@@ -289,7 +288,7 @@ class GestureDetectionService:
         detected_ends: List[int],
         gesture_model: GestureService.Model,
     ) -> Tuple[Optional[Dict[str, Any]], List[List[float]], List[int], List[int], bool]:
-        """Обробляє потік з виявленими групами жестів"""
+        """Handles the stream with detected gesture groups"""
         start_pt = int(np.mean(start_groups[0]))
         end_pts = [int(np.mean(g)) for g in end_groups]
 
@@ -309,7 +308,7 @@ class GestureDetectionService:
             response["bounds"] = [start_pt, end_pt]
             response["status"] = "recognized"
 
-            # Очистимо потік
+            # Clear the stream
             stream, detected_starts, detected_ends = self._cleanup_stream(
                 stream, detected_starts, detected_ends, start_groups, end_groups, end_pt
             )
@@ -327,7 +326,7 @@ class GestureDetectionService:
                 detected_ends = detected_ends[end_pts_to_remove:]
                 return None, stream, detected_starts, detected_ends, False
 
-        # Очистимо потік
+        # Clear the stream
         stream, detected_starts, detected_ends = self._cleanup_stream(
             stream, detected_starts, detected_ends, start_groups, end_groups, end_pt
         )
@@ -342,16 +341,16 @@ class GestureDetectionService:
         gesture_model: GestureService.Model,
     ) -> Dict[str, Any]:
         """
-        Розпізнає жест на основі даних потоку
+        Recognizes a gesture based on stream data
 
         Args:
-            stream: Потік даних
-            start_pt: Індекс початку жеста
-            end_pt: Індекс кінця жеста
-            gesture_model: Модель розпізнавання жестів
+            stream: Data stream
+            start_pt: Gesture start index
+            end_pt: Gesture end index
+            gesture_model: Gesture recognition model
 
         Returns:
-            Словник з передбаченим жестом та впевненістю
+            Dictionary with the predicted gesture and confidence
         """
         gesture_data = stream[start_pt : end_pt + 1]
         response = await self.gesture_service.predict(gesture_model, gesture_data)
@@ -367,7 +366,7 @@ class GestureDetectionService:
         end_pt: int,
     ) -> Tuple[List[List[float]], List[int], List[int]]:
         """
-        Очищує потік від оброблених даних.
+        Clears the stream of processed data.
 
         Returns:
             (updated_stream, updated_starts, updated_ends)

@@ -26,14 +26,12 @@ NUM_FEATURES = 18
 CLOSE_POINTS_THRESHOLD = 30
 MIN_GESTURE_LENGTH = 100
 
-CONFIDENCE_THRESHOLD = 0.7
 WINDOW_SIZE = 223
 
 gesture_service = GestureService(
     sequence_length=SEQUENCE_LENGTH, num_features=NUM_FEATURES
 )
 division_service = DivisionService(
-    confidence_threshold=CONFIDENCE_THRESHOLD,
     window_size=WINDOW_SIZE,
     num_features=NUM_FEATURES,
 )

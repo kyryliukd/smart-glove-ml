@@ -5,22 +5,22 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder, MinMaxScaler
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 
 class GestureService:
     @dataclass
     class Model:
         model: tf.keras.models.Sequential
-        scaler: MinMaxScaler
-        classes: np.ndarray
+        scaler: StandardScaler
+        encoder: OneHotEncoder
 
     def __init__(self, sequence_length: int, num_features: int):
         self.sequence_length = sequence_length
         self.num_features = num_features
         self.local_models: dict[str, GestureService.Model] = {}
         
-    def resample_sequence(self, df: pd.DataFrame, target_length: int) -> pd.DataFrame:
+    def _resample_sequence(self, df: pd.DataFrame, target_length: int) -> pd.DataFrame:
         """
         Adjusts the number of rows in the DataFrame to target_length.
         If there are fewer rows, interpolation is performed.
@@ -55,16 +55,19 @@ class GestureService:
 
     def _predict_sync(self, model: Model, gesture_data: list):
         df = pd.DataFrame(gesture_data)
-        df_resampled = self.resample_sequence(df, self.sequence_length)
+        df_resampled = self._resample_sequence(df, self.sequence_length)
 
         input_data = df_resampled.values.astype(float)
-        data_scaled = np.clip(model.scaler.transform(input_data), -1, 1)
+        data_scaled = model.scaler.transform(input_data)
         data_for_model = np.expand_dims(data_scaled, axis=0)
 
-        prediction_probs = model.model.predict(data_for_model, verbose=0)
+        prediction_probs = model.model.predict(data_for_model, verbose=0)[0]
+        
         label_index = np.argmax(prediction_probs)
-        predicted_label = model.classes[label_index]
-        confidence = np.max(prediction_probs)
+        predicted_label = model.encoder.inverse_transform(
+            np.eye(len(prediction_probs))[label_index].reshape(1, -1)
+        )[0][0]
+        confidence = float(prediction_probs[label_index])
 
         return {"predictedLabel": predicted_label, "confidence": float(confidence)}
 
@@ -73,7 +76,7 @@ class GestureService:
 
     def _train_sync(self, gestures: dict) -> Model:
         if not gestures:
-            raise Exception("Отримано порожні дані для тренування")
+            raise Exception("Received empty data for training")
 
         model = GestureService.Model(model=None, scaler=None, classes=None)
         samples, labels = [], []
@@ -83,16 +86,16 @@ class GestureService:
                 df = pd.DataFrame(seq)
                 if df.shape[1] != self.num_features:
                     print(
-                        f"Пропускаю {label} — неправильна кількість колонок {df.shape[1]}"
+                        f"Skipping {label} — incorrect number of columns {df.shape[1]}"
                     )
                     continue
 
-                df_resampled = GestureService.resample_sequence(
+                df_resampled = GestureService._resample_sequence(
                     df, self.sequence_length
                 )
                 if df_resampled.shape != (self.sequence_length, self.num_features):
                     print(
-                        f"Пропускаю {label} після ресемплінгу — отримано {df_resampled.shape}"
+                        f"Skipping {label} after resampling — received {df_resampled.shape}"
                     )
                     continue
 
@@ -100,27 +103,34 @@ class GestureService:
                 labels.append(label)
 
         if len(samples) == 0:
-            raise Exception("Немає валідних даних для тренування")
+            raise Exception("No valid data for training")
 
         samples, labels = np.array(samples), np.array(labels)
 
-        encoder = LabelEncoder()
-        y = encoder.fit_transform(labels)
-        model.classes = encoder.classes_
-
-        _, counts = np.unique(y, return_counts=True)
+        _, counts = np.unique(labels, return_counts=True)
         if np.any(counts < 2):
-            raise Exception("Кожен клас повинен мати мінімум 2 приклади")
+            raise Exception("Each class must have at least 2 examples")
 
-        X_train, X_test, y_train, y_test = train_test_split(
+        X_train, X_test, labels_train, labels_test = train_test_split(
             samples,
-            y,
-            test_size=0.2,
+            labels,
+            test_size=0.3,
             random_state=42,
-            stratify=y,
+            stratify=labels,
+        )
+        
+        model.encoder = OneHotEncoder(sparse_output=False)
+
+        y_train = model.encoder.fit_transform(
+            labels_train.reshape(-1, 1)
         )
 
-        model.scaler = MinMaxScaler(feature_range=(-1, 1))
+        y_test = model.encoder.transform(
+            labels_test.reshape(-1, 1)
+        )
+
+        model.scaler = StandardScaler()
+
         N_train, T, F = X_train.shape
         N_test = X_test.shape[0]
 
@@ -128,38 +138,56 @@ class GestureService:
         X_test_2d = X_test.reshape(-1, F)
 
         model.scaler.fit(X_train_2d)
-        X_train_scaled = model.scaler.transform(X_train_2d).reshape(N_train, T, F)
-        X_test_scaled = np.clip(
-            model.scaler.transform(X_test_2d).reshape(N_test, T, F), -1, 1
+
+        X_train_scaled = model.scaler.transform(X_train_2d).reshape(
+            N_train, T, F
         )
 
-        model.model = tf.keras.models.Sequential(
-            [
-                tf.keras.layers.Input(shape=(T, F)),
-                tf.keras.layers.LSTM(32, return_sequences=False),
-                tf.keras.layers.Dropout(0.3),
-                tf.keras.layers.Dense(64, activation="relu"),
-                tf.keras.layers.Dropout(0.2),
-                tf.keras.layers.Dense(len(np.unique(y)), activation="softmax"),
-            ]
+        X_test_scaled = model.scaler.transform(X_test_2d).reshape(
+            N_test, T, F
         )
+
+        num_classes = y_train.shape[1]
+
+        model.model = tf.keras.models.Sequential([
+            tf.keras.layers.Input(shape=(T, F)),
+            tf.keras.layers.LSTM(32),
+            tf.keras.layers.Dropout(0.3),
+            tf.keras.layers.Dense(64, activation="relu"),
+            tf.keras.layers.Dropout(0.2),
+            tf.keras.layers.Dense(num_classes, activation="softmax"),
+        ])
 
         model.model.compile(
             optimizer="adam",
-            loss="sparse_categorical_crossentropy",
+            loss="categorical_crossentropy",
             metrics=["accuracy"],
         )
 
         model.model.fit(
             X_train_scaled,
             y_train,
-            validation_data=(X_test_scaled, y_test),
             epochs=30,
             batch_size=16,
             verbose=1,
         )
 
-        _, test_accuracy = model.model.evaluate(X_test_scaled, y_test, verbose=0)
-        print(f"Точність моделі на тестових даних: {test_accuracy * 100:.2f}%")
+        _, train_accuracy = model.model.evaluate(
+            X_train_scaled,
+            y_train,
+            verbose=0
+        )
+
+        _, test_accuracy = model.model.evaluate(
+            X_test_scaled,
+            y_test,
+            verbose=0
+        )
+
+        print(
+            "Custom model evaluation:"
+            f"  Train Accuracy: {train_accuracy * 100:.2f}%\n"
+            f"  Test Accuracy: {test_accuracy * 100:.2f}%"
+        )
 
         return model

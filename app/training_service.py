@@ -51,14 +51,14 @@ class TrainingService:
     async def train_gesture_model(
         self, gesture_service: GestureService, model_id: str
     ) -> None:
-        print(f"Отримано задачу на тренування: modelId={model_id}")
+        print(f"Received a training task: modelId={model_id}")
 
         training_data = await self.fetch_training_data(model_id)
-        print(f"Отримано дані для моделі {model_id}")
+        print(f"Received data for the model {model_id}")
 
         model = await gesture_service.train(training_data)
         await self.storage_service.save_gesture_model(model_id, model)
-        print(f"Модель {model_id} успішно натренована")
+        print(f"Model {model_id} was successfully trained")
         
     async def fetch_training_data(self, model_id: str):
         async with httpx.AsyncClient(timeout=self.timeout) as client:
