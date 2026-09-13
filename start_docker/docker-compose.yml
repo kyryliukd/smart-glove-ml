@@ -35,6 +35,24 @@ services:
     volumes:
       - minio-data:/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  minio-uploader:
+    image: dmytrokyryliuk/smartglove-minio-uploader:latest
+    container_name: smartglove-minio-uploader
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: models
+    restart: "no"
 
   smart-glove-ml:
     image: dmytrokyryliuk/smart-glove-ml:latest
