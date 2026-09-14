@@ -1,7 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, WebSocket, status
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
 
 from . import models
 from .config import settings
@@ -65,7 +65,7 @@ app = FastAPI(lifespan=lifespan)
 
 
 @app.post("/models/gesture/{model_id}")
-async def init_gesture_model(model_id: str):
+async def init_gesture_model(model_id: str = "default"):
     try:
         if model_id in gesture_service.local_models:
             return {"message": "Gesture model already initialized"}
@@ -83,7 +83,7 @@ async def init_gesture_model(model_id: str):
 
 
 @app.delete("/models/gesture/{model_id}")
-async def delete_gesture_model(model_id: str):
+async def delete_gesture_model(model_id: str = "default"):
     if model_id in gesture_service.local_models:
         del gesture_service.local_models[model_id]
         print(f"Gesture model {model_id} deleted from memory")
@@ -95,7 +95,7 @@ async def delete_gesture_model(model_id: str):
         )
 
 
-@app.post("/models/division")
+@app.post("/models/division/{model_id}")
 async def init_division_model(model_id: str = "default"):
     try:
         if model_id in division_service.local_models:
@@ -113,7 +113,7 @@ async def init_division_model(model_id: str = "default"):
         )
 
 
-@app.delete("/models/division")
+@app.delete("/models/division/{model_id}")
 async def delete_division_model(model_id: str = "default"):
     if model_id in division_service.local_models:
         del division_service.local_models[model_id]
@@ -128,7 +128,7 @@ async def delete_division_model(model_id: str = "default"):
 
 @app.post("/predict/gesture")
 async def predict_gesture(gesture: models.GesturePredictionData):
-    gesture_model_id, gesture_data = gesture.ModelId, gesture.rawData
+    gesture_model_id, gesture_data = gesture.modelId, gesture.rawData
 
     if gesture_model_id not in gesture_service.local_models:
         raise HTTPException(
@@ -155,32 +155,51 @@ async def predict_gesture(gesture: models.GesturePredictionData):
 
 
 @app.websocket("/predict/sequence")
-async def predict_sequence(
-    websocket: WebSocket, PredictSequenceData: models.SequencePredictionData
-):
+async def predict_sequence(websocket: WebSocket):
     await websocket.accept()
     print("Client connected to WebSocket")
+    
+    # First massage — config
+    try:
+        config_raw = await websocket.receive_json()
+        config = models.SequencePredictionData(**config_raw)
+    except Exception as e:
+        print(f"Error in WebSocket stream (Invalid config): {e}")
+        await websocket.send_json(
+            {"status": "error", "message": f"Invalid config: {e}"}
+        )
+        await websocket.close(code=1008)
+        return
 
     gesture_model_id, division_model_id = (
-        PredictSequenceData.gestureModelId,
-        PredictSequenceData.divisionModelId,
+        config.gestureModelId,
+        config.divisionModelId,
     )
 
     if gesture_model_id not in gesture_service.local_models:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No gesture model initialized",
+        print("Error in WebSocket stream: No gesture model initialized")
+        await websocket.send_json(
+            {"status": "error", "message": "No gesture model initialized"}
         )
+        await websocket.close(code=4001)
+        return
 
     if division_model_id not in division_service.local_models:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No division model initialized",
+        print("Error in WebSocket stream: No division model initialized")
+        await websocket.send_json(
+            {"status": "error", "message": "No division model initialized"}
         )
+        await websocket.close(code=4002)
+        return
 
     gesture_model = gesture_service.local_models[gesture_model_id]
     division_model = division_service.local_models[division_model_id]
+    
+    await websocket.send_json(
+        {"status": "ready", "message": "All the models are available"}
+    )
 
+    # Data stream
     try:
         detected_starts = []
         detected_ends = []
@@ -201,10 +220,10 @@ async def predict_sequence(
 
             is_end_request = request.get("status", "streaming") == "end"
 
-            if len(stream) < DivisionService.WINDOW:
+            if len(stream) < division_service.window_size:
                 if is_end_request:
-                    needed = DivisionService.WINDOW - len(stream)
-                    stream.extend([[0.0] * DivisionService.FEATURES] * needed)
+                    needed = division_service.window_size - len(stream)
+                    stream.extend([[0.0] * division_service.num_features] * needed)
                 else:
                     continue
 
@@ -229,11 +248,5 @@ async def predict_sequence(
             if should_break:
                 break
 
-    except Exception as e:
-        print(f"Error in WebSocket stream: {e}")
-        await websocket.send_json(
-            {"status": "error", "message": f"Server error: {str(e)}"}
-        )
-
-    finally:
+    except WebSocketDisconnect:
         print("Client disconnected")

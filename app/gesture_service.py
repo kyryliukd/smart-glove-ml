@@ -78,7 +78,7 @@ class GestureService:
         if not gestures:
             raise Exception("Received empty data for training")
 
-        model = GestureService.Model(model=None, scaler=None, classes=None)
+        model = GestureService.Model(model=None, scaler=None, encoder=None)
         samples, labels = [], []
 
         for label, sequences in gestures.items():
@@ -90,7 +90,7 @@ class GestureService:
                     )
                     continue
 
-                df_resampled = GestureService._resample_sequence(
+                df_resampled = self._resample_sequence(
                     df, self.sequence_length
                 )
                 if df_resampled.shape != (self.sequence_length, self.num_features):
@@ -111,7 +111,7 @@ class GestureService:
         if np.any(counts < 2):
             raise Exception("Each class must have at least 2 examples")
 
-        X_train, X_test, labels_train, labels_test = train_test_split(
+        X_train, X_temp, labels_train, labels_temp = train_test_split(
             samples,
             labels,
             test_size=0.3,
@@ -119,10 +119,22 @@ class GestureService:
             stratify=labels,
         )
         
+        X_val, X_test, labels_val, labels_test = train_test_split(
+            X_temp,
+            labels_temp,
+            test_size=0.5,
+            random_state=42,
+            stratify=labels_temp,
+        )
+        
         model.encoder = OneHotEncoder(sparse_output=False)
 
         y_train = model.encoder.fit_transform(
             labels_train.reshape(-1, 1)
+        )
+        
+        y_val = model.encoder.transform(
+            labels_val.reshape(-1, 1)
         )
 
         y_test = model.encoder.transform(
@@ -132,15 +144,21 @@ class GestureService:
         model.scaler = StandardScaler()
 
         N_train, T, F = X_train.shape
+        N_val = X_val.shape[0]
         N_test = X_test.shape[0]
 
         X_train_2d = X_train.reshape(-1, F)
+        X_val_2d = X_val.reshape(-1, F)
         X_test_2d = X_test.reshape(-1, F)
 
         model.scaler.fit(X_train_2d)
 
         X_train_scaled = model.scaler.transform(X_train_2d).reshape(
             N_train, T, F
+        )
+        
+        X_val_scaled = model.scaler.transform(X_val_2d).reshape(
+            N_val, T, F
         )
 
         X_test_scaled = model.scaler.transform(X_test_2d).reshape(
@@ -163,19 +181,29 @@ class GestureService:
             loss="categorical_crossentropy",
             metrics=["accuracy"],
         )
+        
+        early_stopping = tf.keras.callbacks.EarlyStopping(
+            monitor="val_loss", patience=20, min_delta=1e-4, restore_best_weights=True
+        )
+
+        reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
+            monitor="val_loss", factor=0.5, patience=5, min_lr=1e-6
+        )
 
         model.model.fit(
             X_train_scaled,
             y_train,
-            epochs=30,
+            validation_data=(
+                X_val_scaled,
+                y_val
+            ),
+            epochs=100,
             batch_size=16,
+            callbacks=[
+                early_stopping,
+                reduce_lr
+            ],
             verbose=1,
-        )
-
-        _, train_accuracy = model.model.evaluate(
-            X_train_scaled,
-            y_train,
-            verbose=0
         )
 
         _, test_accuracy = model.model.evaluate(
@@ -186,7 +214,6 @@ class GestureService:
 
         print(
             "Custom gesture model evaluation:"
-            f"  Train Accuracy: {train_accuracy * 100:.2f}%\n"
             f"  Test Accuracy: {test_accuracy * 100:.2f}%"
         )
 

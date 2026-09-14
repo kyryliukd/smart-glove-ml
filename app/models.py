@@ -2,7 +2,7 @@ from pydantic import BaseModel
 
 
 class GesturePredictionData(BaseModel):
-    ModelId: str = "default"
+    modelId: str = "default"
     rawData: list[list[float]]
 
 

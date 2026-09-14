@@ -76,8 +76,8 @@ class GestureDetectionService:
         Returns:
             (response, updated_stream, updated_starts, updated_ends, should_break)
         """
-        left = len(stream) - DivisionService.WINDOW
-        window_data = np.array(stream[-DivisionService.WINDOW :])
+        left = len(stream) - self.division_service.window_size
+        window_data = np.array(stream[-self.division_service.window_size:])
 
         detected_start, detected_end = await self.division_service.predict(
             division_model, window_data, left
