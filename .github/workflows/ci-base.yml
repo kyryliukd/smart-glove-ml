@@ -23,7 +23,7 @@ jobs:
 
       - name: Create .env file from secrets
         run: |
-          cat > start_docker/.env <<EOF
+          cat > .env <<EOF
           MONGO_INITDB_ROOT_USERNAME=${{ secrets.MONGO_INITDB_ROOT_USERNAME }}
           MONGO_INITDB_ROOT_PASSWORD=${{ secrets.MONGO_INITDB_ROOT_PASSWORD }}
           RABBITMQ_DEFAULT_USER=${{ secrets.RABBITMQ_DEFAULT_USER }}
@@ -47,7 +47,7 @@ jobs:
         run: ruff check ./app
 
       - name: Run unit tests
-        run: pytest tests/unit -v
+        run: pytest tests -v
 
       - name: Set up Docker Buildx
         if: inputs.run_integration == true

@@ -8,15 +8,21 @@ from app.rabbitmq_service import RabbitMQService
 
 @pytest.mark.asyncio
 async def test_connect_retry_logic():
-    """Test connection with retry logic"""
-    with patch("aio_pika.connect_robust", new_callable=AsyncMock) as mock_connect:
-        mock_connect.return_value = AsyncMock()
-        service = RabbitMQService("amqp://test")
+    connection = AsyncMock()
+    with patch("app.rabbitmq_service.asyncio.sleep", new_callable=AsyncMock):
+        with patch(
+            "app.rabbitmq_service.aio_pika.connect_robust",
+            new_callable=AsyncMock,
+            return_value=connection,
+        ) as mock_connect:
+            connection.channel = AsyncMock()
+            service = RabbitMQService("amqp://test")
 
-        await service.connect()
+            await service.connect()
 
         mock_connect.assert_called_once_with("amqp://test")
-        assert service.connection is not None
+        assert service.connection is connection
+        connection.channel.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -65,7 +71,6 @@ async def test_close_connection():
 
 @pytest.mark.asyncio
 async def test_start_consuming():
-    """Test message consumption"""
     service = RabbitMQService("amqp://test")
     service.channel = AsyncMock()
 
@@ -88,5 +93,5 @@ async def test_start_consuming():
 
     mock_callback = AsyncMock()
 
-    # Should not raise exception
     await service.start_consuming("test_queue", mock_callback)
+    service.channel.declare_queue.assert_awaited_once_with("test_queue", durable=True)
