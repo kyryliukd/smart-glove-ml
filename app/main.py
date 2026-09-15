@@ -1,53 +1,49 @@
 import asyncio
-import json
-import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
 
 from . import models
-from .prediction_service import PredictionService
+from .config import settings
+from .division_service import DivisionService
+from .gesture_detection_service import GestureDetectionService
+from .gesture_service import GestureService
 from .rabbitmq_service import RabbitMQService
+from .storage_service import MinioStorage
 from .training_service import TrainingService
 
-RABBIT_URL = os.getenv("RABBITMQ_URL")
-MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT")
-MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY")
-MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY")
-SERVER_ENDPOINT = os.getenv("SERVER_ENDPOINT")
-
-rabbitmq = RabbitMQService(RABBIT_URL)
-training_service = TrainingService(
-    minio_endpoint=MINIO_ENDPOINT,
-    minio_access_key=MINIO_ACCESS_KEY,
-    minio_secret_key=MINIO_SECRET_KEY,
-    server_endpoint=SERVER_ENDPOINT,
+gesture_service = GestureService(
+    sequence_length=settings.sequence_length,
+    num_features=settings.num_features,
 )
-prediction_service = PredictionService()
-local_models: dict[str, models.Model] = {}
 
+division_service = DivisionService(
+    window_size=settings.window_size,
+    num_features=settings.num_features,
+)
 
-async def process_message(message):
-    async with message.process():
-        try:
-            body = json.loads(message.body.decode())
-            model_id = body.get("modelId")
+gesture_detection_service = GestureDetectionService(
+    gesture_service=gesture_service,
+    division_service=division_service,
+    close_points_threshold=settings.close_points_threshold,
+    min_gesture_length=settings.min_gesture_length,
+)
 
-            await training_service.train_model(model_id)
+rabbitmq = RabbitMQService(settings.rabbitmq_url)
 
-            result = {"modelId": model_id, "status": "SUCCESS", "errorMessage": None}
-            await rabbitmq.publish_result("train_results_queue", result)
+storage_service = MinioStorage(
+    minio_endpoint=settings.minio_endpoint,
+    minio_access_key=settings.minio_access_key,
+    minio_secret_key=settings.minio_secret_key,
+    bucket_name=settings.minio_bucket_name,
+)
 
-        except Exception as e:
-            error_message = str(e)
-            print(f"Consumer error: {e}")
-
-            result = {
-                "modelId": body.get("modelId"),
-                "status": "FAILED",
-                "errorMessage": error_message,
-            }
-            await rabbitmq.publish_result("train_results_queue", result)
+training_service = TrainingService(
+    rabbitmq=rabbitmq,
+    gesture_service=gesture_service,
+    storage_service=storage_service,
+    server_endpoint=settings.server_endpoint,
+)
 
 
 @asynccontextmanager
@@ -55,7 +51,12 @@ async def lifespan(app: FastAPI):
     await rabbitmq.connect()
     await rabbitmq.declare_queue("train_tasks_queue")
     await rabbitmq.declare_queue("train_results_queue")
-    asyncio.create_task(rabbitmq.start_consuming("train_tasks_queue", process_message))
+    asyncio.create_task(
+        rabbitmq.start_consuming(
+            "train_tasks_queue", 
+            training_service.process_message
+        )
+    )
     yield
     await rabbitmq.close()
 
@@ -63,42 +64,76 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
-@app.post("/models/{model_id}")
-async def init_model(model_id: str):
+@app.post("/models/gesture/{model_id}")
+async def init_gesture_model(model_id: str = "default"):
     try:
-        if model_id in local_models:
-            return {"message": "Model already initialized"}
+        if model_id in gesture_service.local_models:
+            return {"message": "Gesture model already initialized"}
 
-        local_models[model_id] = await training_service.storage.load_model(model_id)
-        print(f"Модель {model_id} завантажена в пам'ять")
-        return {"message": "Model initialized successfully"}
+        gesture_service.local_models[
+            model_id
+        ] = await storage_service.load_gesture_model(model_id)
+        print(f"Gesture model {model_id} loaded into memory")
+        return {"message": "Gesture model initialized successfully"}
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to initialize model: {str(e)}",
+            detail=f"Failed to initialize gesture model: {str(e)}",
         )
 
 
-@app.delete("/models/{model_id}")
-async def delete_model(model_id: str):
-    if model_id in local_models:
-        del local_models[model_id]
-        print(f"Модель {model_id} видалена з пам'яті")
-        return {"message": "Model deleted successfully"}
+@app.delete("/models/gesture/{model_id}")
+async def delete_gesture_model(model_id: str = "default"):
+    if model_id in gesture_service.local_models:
+        del gesture_service.local_models[model_id]
+        print(f"Gesture model {model_id} deleted from memory")
+        return {"message": "Gesture model deleted successfully"}
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Model not found",
+            detail="Gesture model not found",
         )
 
 
-@app.post("/predict")
-async def predict_gesture(gesture: models.GestureData):
-    model_id, gesture_data = gesture.modelId, gesture.rawData
+@app.post("/models/division/{model_id}")
+async def init_division_model(model_id: str = "default"):
+    try:
+        if model_id in division_service.local_models:
+            return {"message": "Division model already initialized"}
 
-    if model_id not in local_models:
+        division_service.local_models[
+            model_id
+        ] = await storage_service.load_division_model(model_id)
+        print(f"Division model {model_id} loaded into memory")
+        return {"message": "Division model initialized successfully"}
+    except Exception as e:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="No model initialized"
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to initialize division model: {str(e)}",
+        )
+
+
+@app.delete("/models/division/{model_id}")
+async def delete_division_model(model_id: str = "default"):
+    if model_id in division_service.local_models:
+        del division_service.local_models[model_id]
+        print(f"Division model {model_id} deleted from memory")
+        return {"message": "Division model deleted successfully"}
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Division model not found",
+        )
+
+
+@app.post("/predict/gesture")
+async def predict_gesture(gesture: models.GesturePredictionData):
+    gesture_model_id, gesture_data = gesture.modelId, gesture.rawData
+
+    if gesture_model_id not in gesture_service.local_models:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No gesture model initialized",
         )
 
     if not gesture_data:
@@ -107,13 +142,111 @@ async def predict_gesture(gesture: models.GestureData):
             detail="Invalid format or empty 'rawData' array",
         )
 
-    if len(gesture_data[0]) != training_service.EXPECTED_COLUMNS:
+    if len(gesture_data[0]) != gesture_service.num_features:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Expected {training_service.EXPECTED_COLUMNS} columns, \
+            detail=f"Expected {gesture_service.num_features} columns, \
                 but got {len(gesture_data[0])}",
         )
 
-    current_model = local_models[model_id]
-    response = await prediction_service.predict(current_model, gesture_data)
+    gesture_model = gesture_service.local_models[gesture_model_id]
+    response = await gesture_service.predict(gesture_model, gesture_data)
     return response
+
+
+@app.websocket("/predict/sequence")
+async def predict_sequence(websocket: WebSocket):
+    await websocket.accept()
+    print("Client connected to WebSocket")
+    
+    # First massage — config
+    try:
+        config_raw = await websocket.receive_json()
+        config = models.SequencePredictionData(**config_raw)
+    except Exception as e:
+        print(f"Error in WebSocket stream (Invalid config): {e}")
+        await websocket.send_json(
+            {"status": "error", "message": f"Invalid config: {e}"}
+        )
+        await websocket.close(code=1008)
+        return
+
+    gesture_model_id, division_model_id = (
+        config.gestureModelId,
+        config.divisionModelId,
+    )
+
+    if gesture_model_id not in gesture_service.local_models:
+        print("Error in WebSocket stream: No gesture model initialized")
+        await websocket.send_json(
+            {"status": "error", "message": "No gesture model initialized"}
+        )
+        await websocket.close(code=4001)
+        return
+
+    if division_model_id not in division_service.local_models:
+        print("Error in WebSocket stream: No division model initialized")
+        await websocket.send_json(
+            {"status": "error", "message": "No division model initialized"}
+        )
+        await websocket.close(code=4002)
+        return
+
+    gesture_model = gesture_service.local_models[gesture_model_id]
+    division_model = division_service.local_models[division_model_id]
+    
+    await websocket.send_json(
+        {"status": "ready", "message": "All the models are available"}
+    )
+
+    # Data stream
+    try:
+        detected_starts = []
+        detected_ends = []
+        stream = []
+
+        while True:
+            request = await websocket.receive_json()
+
+            step = request.get("data")
+
+            if step is None:
+                await websocket.send_json(
+                    {"status": "error", "message": "No data provided"}
+                )
+                continue
+
+            stream.extend(step)
+
+            is_end_request = request.get("status", "streaming") == "end"
+
+            if len(stream) < division_service.window_size:
+                if is_end_request:
+                    needed = division_service.window_size - len(stream)
+                    stream.extend([[0.0] * division_service.num_features] * needed)
+                else:
+                    continue
+
+            (
+                response,
+                stream,
+                detected_starts,
+                detected_ends,
+                should_break,
+            ) = await gesture_detection_service.process_window(
+                gesture_model,
+                division_model,
+                stream,
+                detected_starts,
+                detected_ends,
+                is_end_request,
+            )
+
+            if response is not None:
+                await websocket.send_json(response)
+
+            if should_break:
+                break
+
+    except WebSocketDisconnect:
+        print("Client disconnected")

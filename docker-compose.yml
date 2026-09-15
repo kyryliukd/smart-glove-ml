@@ -1,0 +1,66 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: smartglove-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio
+    container_name: smartglove-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  minio-uploader:
+    image: dmytrokyryliuk/smartglove-minio-uploader:latest
+    container_name: smartglove-minio-uploader
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: models
+    restart: "no"
+
+  smart-glove-ml:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: smart-glove-ml:local
+    container_name: smart-glove-ml
+    ports:
+      - "8000:8000"
+    depends_on:
+      - rabbitmq
+      - minio
+    environment:
+      - RABBITMQ_URL=amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/
+      - SERVER_ENDPOINT=http://host.docker.internal:8080
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ROOT_USER}
+      - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD}
+    mem_limit: 4g
+    restart: unless-stopped
+
+volumes:
+  minio-data:
