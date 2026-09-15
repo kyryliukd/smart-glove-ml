@@ -1,15 +1,19 @@
+import os
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
 from dotenv import load_dotenv
-from sklearn.preprocessing import MinMaxScaler
-from tensorflow.keras.layers import Dense
-from tensorflow.keras.models import Sequential
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-env_path = Path(__file__).parent.parent / "start_docker" / ".env"
+env_path = Path(__file__).parent.parent / ".env"
 load_dotenv(dotenv_path=env_path)
+os.environ.setdefault("rabbitmq_url", "amqp://localhost")
+os.environ.setdefault("minio_endpoint", "localhost:9000")
+os.environ.setdefault("minio_access_key", "test-access-key")
+os.environ.setdefault("minio_secret_key", "test-secret-key")
+os.environ.setdefault("server_endpoint", "http://localhost")
 
 
 def pytest_configure(config):
@@ -19,7 +23,7 @@ def pytest_configure(config):
     patcher_minio.start()
 
     # Patch aio_pika before app imports
-    patcher_aio_pika = patch("aio_pika.connect")
+    patcher_aio_pika = patch("aio_pika.connect_robust")
     patcher_aio_pika.start()
 
 
@@ -31,15 +35,19 @@ def sample_gesture_data():
 
 @pytest.fixture
 def sample_model():
-    """Create a simple Keras model for testing"""
-    model = Sequential([Dense(3, activation="softmax", input_shape=(50, 18))])
-    scaler = MinMaxScaler()
+    """Create a lightweight gesture model for service tests."""
+    model = Mock()
+    scaler = StandardScaler()
     scaler.fit(np.random.rand(100, 18))
+    encoder = OneHotEncoder(sparse_output=False)
+    encoder.fit(np.array([["class1"], ["class2"], ["class3"]]))
 
-    from app.GestureService import Model
+    from app.gesture_service import GestureService
 
-    return Model(
-        model=model, scaler=scaler, classes=np.array(["class1", "class2", "class3"])
+    return GestureService.Model(
+        model=model,
+        scaler=scaler,
+        encoder=encoder,
     )
 
 

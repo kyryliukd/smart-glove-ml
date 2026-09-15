@@ -1,11 +1,10 @@
 import asyncio
-import json
-import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, WebSocket, status
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
 
 from . import models
+from .config import settings
 from .division_service import DivisionService
 from .gesture_detection_service import GestureDetectionService
 from .gesture_service import GestureService
@@ -13,73 +12,38 @@ from .rabbitmq_service import RabbitMQService
 from .storage_service import MinioStorage
 from .training_service import TrainingService
 
-RABBIT_URL = os.getenv("RABBITMQ_URL")
-MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT")
-MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY")
-MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY")
-SERVER_ENDPOINT = os.getenv("SERVER_ENDPOINT")
-
-MINIO_BUCKET_NAME = "models"
-
-SEQUENCE_LENGTH = 50
-NUM_FEATURES = 18
-
-CLOSE_POINTS_THRESHOLD = 30
-MIN_GESTURE_LENGTH = 100
-
-CONFIDENCE_THRESHOLD = 0.7
-WINDOW_SIZE = 223
-
-rabbitmq = RabbitMQService(RABBIT_URL)
-storage_service = MinioStorage(
-    minio_endpoint=MINIO_ENDPOINT,
-    minio_access_key=MINIO_ACCESS_KEY,
-    minio_secret_key=MINIO_SECRET_KEY,
-    bucket_name=MINIO_BUCKET_NAME,
-)
-training_service = TrainingService(
-    sequence_length=SEQUENCE_LENGTH,
-    num_features=NUM_FEATURES,
-    storage_service=storage_service,
-    server_endpoint=SERVER_ENDPOINT,
-)
 gesture_service = GestureService(
-    sequence_length=SEQUENCE_LENGTH, num_features=NUM_FEATURES
+    sequence_length=settings.sequence_length,
+    num_features=settings.num_features,
 )
+
 division_service = DivisionService(
-    confidence_threshold=CONFIDENCE_THRESHOLD,
-    window_size=WINDOW_SIZE,
-    num_features=NUM_FEATURES,
+    window_size=settings.window_size,
+    num_features=settings.num_features,
 )
+
 gesture_detection_service = GestureDetectionService(
-    division_service=division_service,
     gesture_service=gesture_service,
-    close_points_threshold=CLOSE_POINTS_THRESHOLD,
-    min_gesture_length=MIN_GESTURE_LENGTH,
+    division_service=division_service,
+    close_points_threshold=settings.close_points_threshold,
+    min_gesture_length=settings.min_gesture_length,
 )
 
+rabbitmq = RabbitMQService(settings.rabbitmq_url)
 
-async def process_message(message):
-    async with message.process():
-        try:
-            body = json.loads(message.body.decode())
-            model_id = body.get("modelId")
+storage_service = MinioStorage(
+    minio_endpoint=settings.minio_endpoint,
+    minio_access_key=settings.minio_access_key,
+    minio_secret_key=settings.minio_secret_key,
+    bucket_name=settings.minio_bucket_name,
+)
 
-            await training_service.train_gesture_model(gesture_service, model_id)
-
-            result = {"modelId": model_id, "status": "SUCCESS", "errorMessage": None}
-            await rabbitmq.publish_result("train_results_queue", result)
-
-        except Exception as e:
-            error_message = str(e)
-            print(f"Consumer error: {e}")
-
-            result = {
-                "modelId": body.get("modelId"),
-                "status": "FAILED",
-                "errorMessage": error_message,
-            }
-            await rabbitmq.publish_result("train_results_queue", result)
+training_service = TrainingService(
+    rabbitmq=rabbitmq,
+    gesture_service=gesture_service,
+    storage_service=storage_service,
+    server_endpoint=settings.server_endpoint,
+)
 
 
 @asynccontextmanager
@@ -87,7 +51,12 @@ async def lifespan(app: FastAPI):
     await rabbitmq.connect()
     await rabbitmq.declare_queue("train_tasks_queue")
     await rabbitmq.declare_queue("train_results_queue")
-    asyncio.create_task(rabbitmq.start_consuming("train_tasks_queue", process_message))
+    asyncio.create_task(
+        rabbitmq.start_consuming(
+            "train_tasks_queue", 
+            training_service.process_message
+        )
+    )
     yield
     await rabbitmq.close()
 
@@ -96,7 +65,7 @@ app = FastAPI(lifespan=lifespan)
 
 
 @app.post("/models/gesture/{model_id}")
-async def init_gesture_model(model_id: str):
+async def init_gesture_model(model_id: str = "default"):
     try:
         if model_id in gesture_service.local_models:
             return {"message": "Gesture model already initialized"}
@@ -114,7 +83,7 @@ async def init_gesture_model(model_id: str):
 
 
 @app.delete("/models/gesture/{model_id}")
-async def delete_gesture_model(model_id: str):
+async def delete_gesture_model(model_id: str = "default"):
     if model_id in gesture_service.local_models:
         del gesture_service.local_models[model_id]
         print(f"Gesture model {model_id} deleted from memory")
@@ -126,7 +95,7 @@ async def delete_gesture_model(model_id: str):
         )
 
 
-@app.post("/models/division")
+@app.post("/models/division/{model_id}")
 async def init_division_model(model_id: str = "default"):
     try:
         if model_id in division_service.local_models:
@@ -144,7 +113,7 @@ async def init_division_model(model_id: str = "default"):
         )
 
 
-@app.delete("/models/division")
+@app.delete("/models/division/{model_id}")
 async def delete_division_model(model_id: str = "default"):
     if model_id in division_service.local_models:
         del division_service.local_models[model_id]
@@ -159,7 +128,7 @@ async def delete_division_model(model_id: str = "default"):
 
 @app.post("/predict/gesture")
 async def predict_gesture(gesture: models.GesturePredictionData):
-    gesture_model_id, gesture_data = gesture.ModelId, gesture.rawData
+    gesture_model_id, gesture_data = gesture.modelId, gesture.rawData
 
     if gesture_model_id not in gesture_service.local_models:
         raise HTTPException(
@@ -186,32 +155,51 @@ async def predict_gesture(gesture: models.GesturePredictionData):
 
 
 @app.websocket("/predict/sequence")
-async def predict_sequence(
-    websocket: WebSocket, PredictSequenceData: models.SequencePredictionData
-):
+async def predict_sequence(websocket: WebSocket):
     await websocket.accept()
     print("Client connected to WebSocket")
+    
+    # First massage — config
+    try:
+        config_raw = await websocket.receive_json()
+        config = models.SequencePredictionData(**config_raw)
+    except Exception as e:
+        print(f"Error in WebSocket stream (Invalid config): {e}")
+        await websocket.send_json(
+            {"status": "error", "message": f"Invalid config: {e}"}
+        )
+        await websocket.close(code=1008)
+        return
 
     gesture_model_id, division_model_id = (
-        PredictSequenceData.gestureModelId,
-        PredictSequenceData.divisionModelId,
+        config.gestureModelId,
+        config.divisionModelId,
     )
 
     if gesture_model_id not in gesture_service.local_models:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No gesture model initialized",
+        print("Error in WebSocket stream: No gesture model initialized")
+        await websocket.send_json(
+            {"status": "error", "message": "No gesture model initialized"}
         )
+        await websocket.close(code=4001)
+        return
 
     if division_model_id not in division_service.local_models:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No division model initialized",
+        print("Error in WebSocket stream: No division model initialized")
+        await websocket.send_json(
+            {"status": "error", "message": "No division model initialized"}
         )
+        await websocket.close(code=4002)
+        return
 
     gesture_model = gesture_service.local_models[gesture_model_id]
     division_model = division_service.local_models[division_model_id]
+    
+    await websocket.send_json(
+        {"status": "ready", "message": "All the models are available"}
+    )
 
+    # Data stream
     try:
         detected_starts = []
         detected_ends = []
@@ -232,10 +220,10 @@ async def predict_sequence(
 
             is_end_request = request.get("status", "streaming") == "end"
 
-            if len(stream) < DivisionService.WINDOW:
+            if len(stream) < division_service.window_size:
                 if is_end_request:
-                    needed = DivisionService.WINDOW - len(stream)
-                    stream.extend([[0.0] * DivisionService.FEATURES] * needed)
+                    needed = division_service.window_size - len(stream)
+                    stream.extend([[0.0] * division_service.num_features] * needed)
                 else:
                     continue
 
@@ -260,11 +248,5 @@ async def predict_sequence(
             if should_break:
                 break
 
-    except Exception as e:
-        print(f"Error in WebSocket stream: {e}")
-        await websocket.send_json(
-            {"status": "error", "message": f"Server error: {str(e)}"}
-        )
-
-    finally:
+    except WebSocketDisconnect:
         print("Client disconnected")

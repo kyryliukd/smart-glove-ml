@@ -215,3 +215,9 @@ __marimo__/
 # Private files
 як запустити.txt
 *.jar
+run_tests.sh
+data/division/data/*.csv
+data/division/test/*.csv
+test_minio_uploader
+_start_docker
+_start_server

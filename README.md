@@ -308,22 +308,16 @@ Run with coverage
 pytest --cov=app --cov-report=html
 ```
 
-Run unit tests
+Run tests
 
 ```bash
-pytest tests/unit/
-```
-
-Run integration tests
-
-```bash
-pytest tests/integration/
+pytest tests/
 ```
 
 Run a specific test
 
 ```bash
-pytest tests/unit/test_models.py
+pytest tests/test_models.py
 ```
 
 ---
@@ -354,14 +348,15 @@ smart-glove-ml/
 ├── app/
 │   ├── main.py
 │   ├── models.py
-│   ├── prediction_service.py
+│   ├── gesture_service.py
+│   ├── division_service.py
+│   ├── gesture_detection_service.py
 │   ├── training_service.py
 │   ├── rabbitmq_service.py
-│   └── storages.py
+│   └── storage_service.py
 │
 ├── tests/
-│   ├── unit/
-│   ├── integration/
+│   ├── test_*.py
 │   └── conftest.py
 │
 ├── data/
