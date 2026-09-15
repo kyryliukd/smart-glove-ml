@@ -4,460 +4,334 @@
 
 [![Prod CI Pipeline](https://github.com/DmytroKyryliuk2023/smart-glove-ml/actions/workflows/prod-ci.yml/badge.svg)](https://github.com/DmytroKyryliuk2023/smart-glove-ml/actions/workflows/prod-ci.yml)
 
-Machine Learning service for Smart Glove gesture recognition. This project provides a FastAPI-based backend that trains TensorFlow/Keras models and performs real-time gesture classification using sensor data collected from a smart glove.
+Machine-learning service for recognizing gestures from Smart Glove sensor data. The service exposes a FastAPI application, stores trained models in MinIO, receives training jobs through RabbitMQ, and communicates with the Smart Glove backend to obtain training data.
 
-The service is designed as part of a distributed Smart Glove system and integrates with external services such as RabbitMQ, MinIO, and the Smart Glove Backend.
+## Contents
 
----
-
-# Table of Contents
-
-- [Project Overview](#project-overview)
-- [Features](#features)
 - [Architecture](#architecture)
 - [Technology Stack](#technology-stack)
-- [Requirements](#requirements)
-- [Installation](#installation)
+- [Repository Layout](#repository-layout)
 - [Configuration](#configuration)
-- [Running the Service](#running-the-service)
-- [API Documentation](#api-documentation)
-- [Testing](#testing)
-- [Linting](#linting)
-- [Project Structure](#project-structure)
-- [Docker](#docker)
-- [Sequence Normalization](#sequence-normalization)
-- [Example API Request](#example-api-request)
-- [License](#license)
+- [Local Development](#local-development)
+- [Docker Compose](#docker-compose)
+- [API](#api)
+- [Model Processing](#model-processing)
+- [Training Flow](#training-flow)
+- [Testing and Linting](#testing-and-linting)
+- [Git-Ignored Files](#git-ignored-files)
 
----
+## Architecture
 
-# Project Overview
+The application has two model pipelines:
 
-Smart Glove ML is responsible for the machine learning functionality of the Smart Glove ecosystem.
+1. **Gesture pipeline** classifies a normalized gesture sequence into a label.
+2. **Division pipeline** detects gesture start and end positions in a stream.
 
-The service provides:
+`GestureDetectionService` combines both pipelines for the WebSocket stream: `DivisionService` finds candidate boundaries, then `GestureService` recognizes the extracted gesture.
 
-- Gesture recognition from smart glove sensor data
-- Training TensorFlow/Keras neural network models
-- Real-time gesture prediction
-- Automatic preprocessing of time-series sensor data
-- Model storage in MinIO
-- Asynchronous training using RabbitMQ
-- REST API built with FastAPI
-
-This service is designed as a scalable microservice that communicates with other backend components.
-
----
-
-# Features
-
-- TensorFlow/Keras neural network for gesture recognition
-- Automatic preprocessing of sensor sequences
-- Fixed-length sequence normalization
-- FastAPI REST API
-- Real-time gesture prediction
-- Asynchronous model training
-- RabbitMQ integration
-- MinIO model storage
-- MongoDB integration
-- Docker support
-- Unit and integration tests
-- GitHub Actions CI pipelines
-
----
-
-# Architecture
-
-```
-                   Smart Glove Backend
-                           │
-                           ▼
-                    FastAPI Application
-┌─────────────────────────────────────────────────────────────┐
-│                                                             │
-│  Prediction Service                                         │
-│  Training Service                                           │
-│  RabbitMQ Service                                           │
-│  Storage Service                                            │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
-          │                    │                    │
-          ▼                    ▼                    ▼
-      RabbitMQ              MinIO              MongoDB
+```text
+Smart Glove Backend
+        |
+        | training data and model requests
+        v
+FastAPI application (app/main.py)
+        |-- GestureService
+        |-- DivisionService
+        |-- GestureDetectionService
+        |-- TrainingService ---- HTTP ----> Smart Glove Backend
+        |-- RabbitMQService --------------> RabbitMQ
+        `-- MinioStorage -----------------> MinIO
 ```
 
-Main components:
+At startup, the application connects to RabbitMQ and starts consuming `train_tasks_queue`. Trained models are uploaded to the `models` MinIO bucket and can later be loaded into the in-memory model registries.
 
-- **Prediction Service** – loads trained models and performs inference.
-- **Training Service** – trains new neural network models.
-- **RabbitMQ Service** – receives and publishes training jobs.
-- **Storage Service** – uploads and downloads models from MinIO.
-
----
-
-# Technology Stack
-
-- Python 3.12
-- FastAPI
-- TensorFlow / Keras
-- scikit-learn
-- pandas
-- NumPy
-- RabbitMQ
-- MinIO
-- MongoDB
-- Docker
-- Pytest
-- Ruff
-
----
-
-# Requirements
+## Technology Stack
 
 - Python 3.12+
-- RabbitMQ
-- MinIO
-- MongoDB
-- Smart Glove Backend
+- FastAPI and Uvicorn
+- TensorFlow / Keras
+- NumPy and pandas
+- scikit-learn
+- RabbitMQ with `aio-pika`
+- MinIO with the MinIO Python client
+- Pytest and pytest-asyncio
+- Ruff
+- Docker and Docker Compose
 
----
+## Repository Layout
 
-# Installation
-
-## Clone the repository
-
-```bash
-git clone <repository-url>
-cd smart-glove-ml
+```text
+smart-glove-ml/
+|-- app/
+|   |-- main.py                     # FastAPI app and HTTP/WebSocket routes
+|   |-- config.py                   # Environment-backed settings
+|   |-- models.py                   # Request models
+|   |-- gesture_service.py          # Gesture training, resampling, prediction
+|   |-- division_service.py         # Stream boundary prediction
+|   |-- gesture_detection_service.py# Stream processing and recognition
+|   |-- training_service.py         # Training-job orchestration
+|   |-- rabbitmq_service.py         # RabbitMQ connection and messaging
+|   `-- storage_service.py          # Gesture/division model storage in MinIO
+|-- data/
+|   |-- gesture/                    # Raw gesture recordings
+|   |-- division/                   # Stream boundary training data
+|   `-- gesture_merged/             # Prepared gesture datasets
+|-- models/
+|   |-- gesture/                    # Local gesture model artifacts
+|   `-- division/                   # Local division model artifacts
+|-- minio-uploader/                 # Image/script for initial MinIO upload
+|-- notebooks/                      # EDA, training, prediction, and data prep
+|-- tests/                          # Unit tests and shared pytest fixtures
+|-- test_server/                    # Small local backend stub
+|-- Dockerfile
+|-- docker-compose.yml              # RabbitMQ, MinIO, uploader, and ML service
+|-- requirements.txt                # Runtime dependencies
+|-- requirements.dev.txt            # Development/test dependencies
+|-- requirements.eda.txt            # EDA/notebook dependencies
+|-- pytest.ini
+`-- pyproject.toml                  # Ruff configuration
 ```
 
-## Create a virtual environment
+## Configuration
 
-Linux/macOS
+Create a root `.env` file for local execution. `.env` is ignored by Git and must not be committed.
+
+```env
+RABBITMQ_URL=amqp://user:password@localhost:5672/
+MINIO_ENDPOINT=localhost:9000
+MINIO_ACCESS_KEY=minioadmin
+MINIO_SECRET_KEY=minioadmin
+MINIO_BUCKET_NAME=models
+SERVER_ENDPOINT=http://localhost:8080
+
+# Optional settings; these values are the application defaults.
+SEQUENCE_LENGTH=50
+NUM_FEATURES=18
+WINDOW_SIZE=223
+CLOSE_POINTS_THRESHOLD=30
+MIN_GESTURE_LENGTH=100
+```
+
+`app/config.py` loads these values through Pydantic Settings. The required values are `RABBITMQ_URL`, `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, and `SERVER_ENDPOINT`. `MINIO_BUCKET_NAME` defaults to `models`.
+
+## Local Development
+
+Create and activate a virtual environment:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 ```
 
-Windows
-
-```powershell
-python -m venv .venv
-.venv\Scripts\activate
-```
-
-## Install dependencies
+Install runtime and development dependencies:
 
 ```bash
 pip install -r requirements.txt
+pip install -r requirements.dev.txt
 ```
 
-Install development dependencies
-
-```bash
-pip install -r requirements_dev.txt
-```
-
----
-
-# Configuration
-
-Create a `.env` file in the project root.
-
-```env
-MONGO_INITDB_ROOT_USERNAME=
-MONGO_INITDB_ROOT_PASSWORD=
-
-RABBITMQ_DEFAULT_USER=
-RABBITMQ_DEFAULT_PASS=
-
-MINIO_ROOT_USER=
-MINIO_ROOT_PASSWORD=
-
-JWT_SECRET_KEY=
-JWT_EXPIRATION=
-```
-
----
-
-# Running the Service
-
-## Local
+Start RabbitMQ and MinIO separately, or use Docker Compose. Then start the application:
 
 ```bash
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-The API will be available at
+The service is available at `http://localhost:8000`.
 
-```
-http://localhost:8000
-```
+Interactive API documentation is available at:
 
-## Docker
+- Swagger UI: `http://localhost:8000/docs`
+- ReDoc: `http://localhost:8000/redoc`
+
+## Docker Compose
+
+The root Compose file starts:
+
+- RabbitMQ on ports `5672` and `15672`
+- MinIO API on port `9000`
+- MinIO Console on port `9001`
+- the ML service on port `8000`
+- the one-shot MinIO uploader for bundled model artifacts
+
+Configure the credentials used by Compose, then run:
 
 ```bash
-cd start_docker
-
-docker-compose up -d
+docker compose up -d --build
 ```
 
-Stop the services
+Stop the stack:
 
 ```bash
-docker-compose down
+docker compose down
 ```
 
----
+The Compose service passes the ML container these internal values: `rabbitmq:5672`, `minio:9000`, and `http://host.docker.internal:8080` for the backend endpoint.
 
-# API Documentation
+## API
 
-After starting the application:
+### Load and delete gesture models
 
-- Swagger UI
-
-```
-http://localhost:8000/docs
-```
-
-- ReDoc
-
-```
-http://localhost:8000/redoc
+```text
+POST   /models/gesture/{model_id}
+DELETE /models/gesture/{model_id}
 ```
 
----
+Loading downloads the model, scaler, and encoder from MinIO into the local gesture model registry. Deleting removes the model from that registry.
 
-## Predict Gesture
+### Load and delete division models
 
+```text
+POST   /models/division/{model_id}
+DELETE /models/division/{model_id}
 ```
-POST /predict
+
+Division models contain the start/end classifiers, start/end normalization models, scaler, and detection thresholds.
+
+### Predict one gesture
+
+```text
+POST /predict/gesture
 ```
 
-Request
+The requested gesture model must already be loaded. Each sensor row must have 18 features.
+
+Request:
 
 ```json
 {
-  "modelId": "model_123",
+  "modelId": "default",
   "rawData": [
-    [1.0, 2.0, 3.0],
-    [1.2, 2.3, 3.4]
+    [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8]
   ]
 }
 ```
 
-Response
+Response:
 
 ```json
 {
-  "predictedLabel": "ok",
+  "predictedLabel": "hello",
   "confidence": 0.95
 }
 ```
 
----
+### Predict from a stream
 
-## Train Model
+```text
+WebSocket /predict/sequence
+```
 
-Training jobs are submitted through RabbitMQ.
-
-Example message:
+The client sends an initial configuration:
 
 ```json
 {
-  "modelId": "model_123"
+  "gestureModelId": "default",
+  "divisionModelId": "default"
 }
 ```
 
-Training result:
+After both models are loaded, the server responds with:
 
 ```json
 {
-  "modelId": "model_123",
+  "status": "ready",
+  "message": "All the models are available"
+}
+```
+
+The client then sends stream chunks:
+
+```json
+{
+  "status": "streaming",
+  "data": [[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8]]
+}
+```
+
+The final chunk uses `"status": "end"`. Recognition responses contain the predicted gesture, its confidence, and detected bounds. Invalid configuration or unavailable models result in an error response and a WebSocket close code.
+
+## Training Flow
+
+Training is initiated by publishing a JSON message to RabbitMQ queue `train_tasks_queue`:
+
+```json
+{
+  "modelId": "default"
+}
+```
+
+`TrainingService` then:
+
+1. Requests training data from `{SERVER_ENDPOINT}/api/v1/internal/models/{model_id}/training-data`.
+2. Calls `GestureService.train`.
+3. Saves the resulting Keras model, scaler, and encoder to MinIO.
+4. Publishes a result to `train_results_queue`.
+
+Successful result:
+
+```json
+{
+  "modelId": "default",
   "status": "SUCCESS",
   "errorMessage": null
 }
 ```
 
----
+## Model Processing
 
-# Sequence Normalization
+Gesture sequences are normalized to 50 time steps before training and prediction:
 
-Sensor recordings naturally vary in length. Before training or prediction, every sequence is normalized to **50 time steps**.
+- shorter sequences are linearly interpolated;
+- longer sequences are uniformly downsampled;
+- sequences already containing 50 rows are kept unchanged.
 
-- Shorter sequences are linearly interpolated.
-- Longer sequences are uniformly resampled.
-- Sequences of exactly 50 samples remain unchanged.
+The default sensor width is 18 features. Division inference uses a sliding window of 223 rows and converts normalized start/end positions into absolute stream indexes.
 
-This ensures consistent model input dimensions.
+## Testing and Linting
 
----
+The unit tests are located directly in `tests/`.
 
-# Testing
-
-Run all tests
+Run all tests:
 
 ```bash
-pytest
+pytest tests -v
 ```
 
-Run with coverage
+Run tests with terminal coverage:
 
 ```bash
-pytest --cov=app --cov-report=html
+pytest tests --cov=app --cov-report=term-missing
 ```
 
-Run tests
+Generate an HTML coverage report locally:
 
 ```bash
-pytest tests/
+pytest tests --cov=app --cov-report=html
 ```
 
-Run a specific test
-
-```bash
-pytest tests/test_models.py
-```
-
----
-
-# Linting
-
-The project uses **Ruff** for linting and formatting.
-
-Check the code
+Run Ruff:
 
 ```bash
 ruff check app tests
 ```
 
-Automatically fix issues
+The GitHub Actions workflows install `requirements.dev.txt`, run Ruff, and execute the tests. Integration deployment steps are enabled by the workflow configuration when requested.
 
-```bash
-ruff check app tests --fix
-```
+## Git-Ignored Files
 
----
+The repository intentionally does not track local environment and generated files, including:
 
-# Project Structure
+- `.env` and virtual environments such as `.venv/`;
+- Python caches, `.pytest_cache/`, coverage data, and `htmlcov/`;
+- notebook checkpoints and other IPython local state;
+- build, packaging, and tool caches.
 
-```
-smart-glove-ml/
-│
-├── app/
-│   ├── main.py
-│   ├── models.py
-│   ├── gesture_service.py
-│   ├── division_service.py
-│   ├── gesture_detection_service.py
-│   ├── training_service.py
-│   ├── rabbitmq_service.py
-│   └── storage_service.py
-│
-├── tests/
-│   ├── test_*.py
-│   └── conftest.py
-│
-├── data/
-│
-├── start_docker/
-│
-├── start_server/
-│
-├── Dockerfile
-├── requirements.txt
-├── requirements_dev.txt
-├── pytest.ini
-├── run_tests.sh
-└── README.md
-```
+These files may appear in a local checkout but should not be added to commits. The model files under `models/` and the bundled uploader files under `minio-uploader/files/` are repository artifacts and are separate from the runtime-generated caches ignored above.
 
----
-
-# Docker
-
-Build the image
-
-```bash
-docker build -t smart-glove-ml .
-```
-
-Run using Docker Compose
-
-```bash
-cd start_docker
-
-docker-compose up -d
-```
-
-Services:
-
-| Service | URL |
-|----------|-----|
-| Smart Glove ML | http://localhost:8000 |
-| Smart Glove Backend | http://localhost:8080 |
-| RabbitMQ Management | http://localhost:15672 |
-| MinIO Console | http://localhost:9001 |
-| MongoDB | localhost:27018 |
-
----
-
-# Example API Request
-
-```python
-import requests
-
-gesture = [
-    [1.0, 2.0, 3.0],
-    [1.1, 2.1, 3.1],
-]
-
-response = requests.post(
-    "http://localhost:8000/predict",
-    json={
-        "modelId": "model_123",
-        "rawData": gesture
-    }
-)
-
-prediction = response.json()
-
-print(prediction["predictedLabel"])
-print(prediction["confidence"])
-```
-
----
-
-# Development
-
-Install a new dependency
-
-```bash
-pip install package-name
-```
-
-Update requirements
-
-```bash
-pip freeze > requirements.txt
-```
-
-Before creating a pull request, it is recommended to run:
-
-```bash
-ruff check app tests
-pytest
-```
-
----
-
-# License
+## License
 
 This project is licensed under the MIT License.
 
----
+## Author
 
-# Author
-
-Developed as part of the **Smart Glove** project and coursework at **Lviv Polytechnic National University**.
+Developed as part of the Smart Glove project and coursework at Lviv Polytechnic National University.
